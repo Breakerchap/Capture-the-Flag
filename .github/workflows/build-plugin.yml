@@ -1,6 +1,7 @@
 name: Build Paper plugin
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - paper-26.2-plugin
