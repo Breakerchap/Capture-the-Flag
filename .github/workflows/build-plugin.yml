@@ -1,0 +1,28 @@
+name: Build Paper plugin
+
+on:
+  push:
+    branches:
+      - paper-26.2-plugin
+  pull_request:
+    paths:
+      - 'pom.xml'
+      - 'src/**'
+      - '.github/workflows/build-plugin.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - name: Build
+        run: mvn --batch-mode --update-snapshots package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CaptureTheFlag-Paper-26.2
+          path: target/CaptureTheFlag-*.jar

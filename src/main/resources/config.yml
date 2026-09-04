@@ -1,0 +1,24 @@
+game:
+  default-required-flags: 4
+  default-win-seconds: 60
+  neutral-flag-material: GLASS
+  build-block-count: 128
+  flag-block-count: 64
+
+  allowed-build-on:
+    - GRASS_BLOCK
+    - DIRT
+    - COBBLESTONE
+    - FARMLAND
+    - WHEAT
+    - CARROTS
+    - COBBLESTONE_STAIRS
+    - RED_TERRACOTTA
+    - BLUE_TERRACOTTA
+
+  breakable-blocks:
+    - RED_TERRACOTTA
+    - BLUE_TERRACOTTA
+    - RED_STAINED_GLASS
+    - BLUE_STAINED_GLASS
+    - GLASS
