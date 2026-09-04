@@ -1,0 +1,2 @@
+clear @s elytra
+item replace entity @s armor.chest with leather_chestplate[trim={pattern:dune,material:redstone},dyed_color={rgb:1908001},custom_name='["",{"text":"Vampire\'s Robe","italic":false,"color":"dark_red"}]',enchantment_glint_override=false,enchantments={levels:{protection:2}},unbreakable={}]

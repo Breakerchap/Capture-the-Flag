@@ -1,0 +1,1 @@
+effect give @a[tag=chef] health_boost 1 1 true

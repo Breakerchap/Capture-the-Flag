@@ -1,0 +1,18 @@
+{
+    "criteria": {
+      "using_item": {
+        "trigger": "minecraft:using_item",
+        "conditions": {
+          "item": {
+            "items": "minecraft:soul_lantern",
+            "predicates": {
+              "minecraft:custom_data": "{raise:dead}"
+            }
+          }
+        }
+      }
+    },
+    "rewards": {
+      "function": "ctf:necromancer/raise_dead/raise_dead"
+    }
+  }

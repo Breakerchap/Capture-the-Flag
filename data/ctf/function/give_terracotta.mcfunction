@@ -1,0 +1,4 @@
+give @s[team=Red] red_terracotta[can_place_on={predicates:[{blocks:grass_block},{blocks:dirt},{blocks:cobblestone},{blocks:farmland},{blocks:wheat},{blocks:carrots},{blocks:cobblestone_stairs},{blocks:"blue_terracotta"},{blocks:red_terracotta}]}] 128
+give @s[team=Red] red_stained_glass[can_place_on={predicates:[{blocks:beacon},{blocks:red_stained_glass},{blocks:blue_stained_glass}]}] 64
+give @s[team=Blue] blue_terracotta[can_place_on={predicates:[{blocks:grass_block},{blocks:dirt},{blocks:cobblestone},{blocks:farmland},{blocks:wheat},{blocks:carrots},{blocks:cobblestone_stairs},{blocks:"blue_terracotta"},{blocks:red_terracotta}]}] 128
+give @s[team=Blue] blue_stained_glass[can_place_on={predicates:[{blocks:beacon},{blocks:red_stained_glass},{blocks:blue_stained_glass}]}] 64

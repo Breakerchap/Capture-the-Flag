@@ -1,0 +1,11 @@
+{
+    "criteria": {
+      "hit_any_entity": {
+        "trigger": "minecraft:player_hurt_entity"
+      }
+    },
+    "rewards": {
+      "function": "ctf:vampire/lifesteal/lifesteal"
+    }
+  }
+  

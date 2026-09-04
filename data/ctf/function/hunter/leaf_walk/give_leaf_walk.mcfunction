@@ -1,0 +1,1 @@
+item replace entity @s hotbar.8 with dark_oak_leaves[consumable={consume_seconds:1000000,has_consume_particles:0b},custom_data={leaf_walk:true},custom_name='["",{"text":"Leaf Walk","italic":false,"color":"#00cc00"}]',enchantment_glint_override=true]

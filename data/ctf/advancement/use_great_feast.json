@@ -1,0 +1,18 @@
+{
+    "criteria": {
+      "using_item": {
+        "trigger": "minecraft:using_item",
+        "conditions": {
+          "item": {
+            "items": "minecraft:suspicious_stew",
+            "predicates": {
+              "minecraft:custom_data": "{great_feast:true}"
+            }
+          }
+        }
+      }
+    },
+    "rewards": {
+      "function": "ctf:chef/great_feast/great_feast"
+    }
+  }

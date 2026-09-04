@@ -1,0 +1,1 @@
+item replace entity @s hotbar.8 with water_bucket[enchantment_glint_override=true,can_place_on={predicates:[{blocks:grass_block},{blocks:dirt},{blocks:cobblestone},{blocks:farmland},{blocks:wheat},{blocks:carrots},{blocks:cobblestone_stairs},{blocks:"blue_terracotta"},{blocks:red_terracotta}]}]

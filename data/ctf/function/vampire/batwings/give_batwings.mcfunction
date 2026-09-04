@@ -1,0 +1,1 @@
+item replace entity @s hotbar.8 with firework_star[custom_data={bat:wings},consumable={consume_seconds:1000000,has_consume_particles:0b},enchantment_glint_override=true,custom_name='["",{"text":"Batwings","italic":false,"color":"dark_red"}]',unbreakable={}]

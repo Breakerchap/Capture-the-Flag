@@ -1,0 +1,1 @@
+item replace entity @s hotbar.8 with suspicious_stew[food={nutrition:0,saturation:0,can_always_eat:1b},consumable={consume_seconds:1000000,has_consume_particles:0b},custom_data={great_feast:true},custom_name='["",{"text":"Great Feast","italic":false,"color":"gold"}]',enchantment_glint_override=true]

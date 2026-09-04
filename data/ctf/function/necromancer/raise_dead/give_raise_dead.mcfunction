@@ -1,0 +1,1 @@
+item replace entity @s hotbar.8 with soul_lantern[enchantment_glint_override=true,custom_data={raise:dead},custom_name='["",{"text":"Raise Dead","italic":false,"color":"dark_purple"}]',consumable={consume_seconds:1000000,has_consume_particles:0b}]

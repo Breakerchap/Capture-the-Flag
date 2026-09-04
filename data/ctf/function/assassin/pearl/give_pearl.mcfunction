@@ -1,0 +1,1 @@
+item replace entity @s hotbar.8 with ender_pearl[enchantment_glint_override=true]
