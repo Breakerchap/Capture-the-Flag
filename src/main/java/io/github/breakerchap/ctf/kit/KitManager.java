@@ -251,7 +251,7 @@ public final class KitManager {
   }
 
   private void pro(Player player) {
-    player.getInventory().setBoots(unbreakable(Material.IRON_BOOTS));
+    player.getInventory().setBoots(new ItemStack(Material.IRON_BOOTS));
     player.getInventory().addItem(unbreakable(Material.WOODEN_AXE));
     player.getInventory().addItem(unbreakable(Material.FISHING_ROD));
     player.getInventory().addItem(customPotion(
@@ -340,7 +340,11 @@ public final class KitManager {
   }
 
   public ItemStack batwingElytra() {
-    return named(Material.ELYTRA, "Batwings", NamedTextColor.DARK_RED);
+    ItemStack item = named(Material.ELYTRA, "Batwings", NamedTextColor.DARK_RED);
+    ItemMeta meta = item.getItemMeta();
+    meta.setEnchantmentGlintOverride(true);
+    item.setItemMeta(meta);
+    return item;
   }
 
   private void giveTeamBlocks(Player player, TeamSide team) {
