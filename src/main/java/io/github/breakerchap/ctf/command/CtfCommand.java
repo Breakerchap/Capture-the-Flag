@@ -278,7 +278,10 @@ public final class CtfCommand implements TabExecutor {
       return;
     }
     if (!games.startGame(arena)) {
-      sender.sendMessage(Component.text("Arena is already active.", NamedTextColor.RED));
+      String reason = games.state(arena) == ArenaState.WAITING
+          ? "Could not start the arena. The pre-game backup failed; check the server console."
+          : "Arena is already active.";
+      sender.sendMessage(Component.text(reason, NamedTextColor.RED));
       return;
     }
     sender.sendMessage(Component.text("Starting " + arena.name() + ".", NamedTextColor.GREEN));
