@@ -15,10 +15,15 @@ This branch ports the original datapack to a standalone Paper **26.2** plugin. T
 - Hunter Leaf Walk removes old leaves immediately, follows normal jumps upward, and drops downward while sneaking.
 - Red/blue timers, bossbars and flag counts are per arena, rather than global scoreboards.
 - Team membership is per arena, so two games in one world do not share scores or teams.
-- Temporary Hunter leaves are tracked and cleaned up without deleting unrelated map leaves.
+- Temporary Hunter leaves are reference-counted per block, so overlapping Leaf Walk users cannot delete each other's platform.
+- Swimmer water is ownership-tracked as it flows and only ability-created water is removed after 5.5 seconds; existing map water is left alone.
 - Abilities that depend on facing use the player's full 3D look direction, including up/down.
-- Each game captures a pre-game block snapshot of the arena. Stop, finish and plugin shutdown restore that snapshot automatically.
+- Each game captures a pre-game block snapshot of the arena. Stop, finish and plugin shutdown restore it automatically.
+- Active-match snapshots are also written to `plugins/CaptureTheFlag/snapshots/`, so an interrupted server process is recovered on the next startup. Container contents are included.
 - Necromancer mobs are tagged to an arena/team and respect friendly-fire rules.
+- Disconnecting no longer removes a player's arena/team/class session; reconnecting during the same server run restores them to the current match state without resetting long cooldowns.
+- The post-game results phase shows the winner, final flag totals and each player's kills/deaths before restoring the arena and returning players to their team base.
+- Class kits now mirror the datapack's gameplay-relevant item details more closely, including armour trims, the Assassin dagger model/attack speed, Necromancer wand knockback, Swimmer trident attributes and custom Assassin/Necromancer food values.
 
 ## Build
 
@@ -108,9 +113,11 @@ Stopping or finishing a game automatically restores the arena to the block state
 
 ## Ability behaviour
 
-Ability cooldowns keep their item in the inventory and show the normal Minecraft cooldown sweep. If hotbar slot 9 is occupied when an ability becomes available, the plugin uses another free inventory slot instead of overwriting the existing item.
+Ability cooldowns keep their item in the inventory and show the normal Minecraft cooldown sweep. Ability lore shows `Ready` or the remaining cooldown, and trying to use an ability early gives a brief actionbar timer. If hotbar slot 9 is occupied when an ability becomes available, the plugin uses another free inventory slot instead of overwriting the existing item.
 
-Leaf Walk lasts 5 seconds, matching the datapack. Its current 3x3 leaf platform is the only temporary platform kept: leaves behind the player disappear on the next tick. Jumping raises the platform as the player rises; holding sneak removes the platform beneath the player so they can descend, and releasing sneak recreates it at the new height.
+Leaf Walk lasts 5 seconds, matching the datapack. Its current 3x3 leaf platform is the only temporary platform kept: leaves behind the player disappear on the next tick. Jumping raises the platform as the player rises; holding sneak removes the platform beneath the player so they can descend, and releasing sneak recreates it at the new height. Overlapping Hunter platforms share ownership safely.
+
+The Swimmer's temporary water remains for 5.5 seconds. Flowing blocks inherit ownership from the ability source, and cleanup restores only blocks changed by that ability rather than scanning and deleting all nearby water.
 
 ## Flag behaviour
 
