@@ -10,10 +10,14 @@ This branch ports the original datapack to a standalone Paper **26.2** plugin. T
 - Setup uses placeable marker items rather than editing coordinates in functions.
 - Flag points can be either 1x1 or 2x2, so the original map's four-block flag pads can be represented without hard-coding them.
 - Arena configuration is saved to `plugins/CaptureTheFlag/arenas.yml`.
-- Build and break material lists are configurable in `config.yml`.
+- Team building blocks can be placed anywhere inside an arena except in a vertical column above a beacon/capture point; breakable materials remain configurable in `config.yml`.
+- Ability items remain visible during cooldown and use Minecraft's normal item cooldown overlay instead of disappearing/replacing inventory contents.
+- Hunter Leaf Walk removes old leaves immediately, follows normal jumps upward, and drops downward while sneaking.
 - Red/blue timers, bossbars and flag counts are per arena, rather than global scoreboards.
 - Team membership is per arena, so two games in one world do not share scores or teams.
 - Temporary Hunter leaves are tracked and cleaned up without deleting unrelated map leaves.
+- Abilities that depend on facing use the player's full 3D look direction, including up/down.
+- Each game captures a pre-game block snapshot of the arena. Stop, finish and plugin shutdown restore that snapshot automatically.
 - Necromancer mobs are tagged to an arena/team and respect friendly-fire rules.
 
 ## Build
@@ -96,6 +100,18 @@ Stop a game with:
 /ctf stop <arena>
 ```
 
+Stopping or finishing a game automatically restores the arena to the block state captured immediately before that game started. To force the last snapshot to be applied again:
+
+```text
+/ctf reset <arena>
+```
+
+## Ability behaviour
+
+Ability cooldowns keep their item in the inventory and show the normal Minecraft cooldown sweep. If hotbar slot 9 is occupied when an ability becomes available, the plugin uses another free inventory slot instead of overwriting the existing item.
+
+Leaf Walk lasts 5 seconds, matching the datapack. Its current 3x3 leaf platform is the only temporary platform kept: leaves behind the player disappear on the next tick. Jumping raises the platform as the player rises; holding sneak removes the platform beneath the player so they can descend, and releasing sneak recreates it at the new height.
+
 ## Flag behaviour
 
 At game start every configured flag cell is reset to the arena's neutral flag material (glass by default). A flag counts as red or blue only when every cell in that flag point is the team's stained glass. When a team controls at least `required-flags`, its countdown decreases once per second. The first countdown to reach zero wins.
@@ -103,4 +119,4 @@ At game start every configured flag cell is reset to the arena's neutral flag ma
 ## Permissions
 
 - `ctf.play` — join, leave and choose a class; granted by default.
-- `ctf.admin` — arena setup/start/stop/reload; op by default.
+- `ctf.admin` — arena setup/start/stop/reset/reload; op by default.
