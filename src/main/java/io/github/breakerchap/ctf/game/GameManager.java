@@ -244,12 +244,16 @@ public final class GameManager {
       }
       case RUNNING -> {
         showBossbars(player, runtime);
-        player.setGameMode(GameMode.SURVIVAL);
-        String ability = classAbility(session.ctfClass());
-        if (ability != null) {
-          ensureAbility(player, ability);
-          applyVisualCooldown(player, ability, cooldown(player, ability));
-          updateAbilityLore(player, ability);
+        if (!runtime.spawnedPlayers.contains(player.getUniqueId())) {
+          spawnAndKit(player);
+        } else {
+          player.setGameMode(GameMode.SURVIVAL);
+          String ability = classAbility(session.ctfClass());
+          if (ability != null) {
+            ensureAbility(player, ability);
+            applyVisualCooldown(player, ability, cooldown(player, ability));
+            updateAbilityLore(player, ability);
+          }
         }
       }
       case FINISHED -> {
@@ -289,6 +293,7 @@ public final class GameManager {
     resetFlags(arena);
     runtime.redSeconds = arena.winSeconds();
     runtime.blueSeconds = arena.winSeconds();
+    runtime.spawnedPlayers.clear();
     runtime.state = ArenaState.COUNTDOWN;
     updateBossbars(runtime);
 
@@ -336,6 +341,7 @@ public final class GameManager {
     runtime.state = ArenaState.WAITING;
     runtime.redSeconds = arena.winSeconds();
     runtime.blueSeconds = arena.winSeconds();
+    runtime.spawnedPlayers.clear();
 
     if (wasActive) {
       clearTransientBlocks(arena);
@@ -667,6 +673,7 @@ public final class GameManager {
       deleteSnapshotFile(runtime.arena);
       runtime.redSeconds = runtime.arena.winSeconds();
       runtime.blueSeconds = runtime.arena.winSeconds();
+      runtime.spawnedPlayers.clear();
       runtime.state = ArenaState.WAITING;
 
       for (Player player : players(runtime.arena)) {
@@ -730,6 +737,7 @@ public final class GameManager {
     player.setFoodLevel(20);
     player.setSaturation(20.0f);
     givePlayerKit(player);
+    runtime(arena).spawnedPlayers.add(player.getUniqueId());
   }
 
   private void initialiseCooldowns(Player player, CtfClass ctfClass) {
@@ -1526,6 +1534,7 @@ public final class GameManager {
     private int blueSeconds;
     private final BossBar redBar;
     private final BossBar blueBar;
+    private final Set<UUID> spawnedPlayers = new HashSet<>();
     private ArenaSnapshot snapshot;
 
     private RuntimeArena(Arena arena) {
