@@ -40,7 +40,6 @@ public final class GameListener implements Listener {
   private final ArenaManager arenas;
   private final GameManager games;
   private final KitManager kits;
-  private final Set<Material> allowedBuildOn;
   private final Set<Material> breakable;
 
   public GameListener(CaptureTheFlagPlugin plugin, ArenaManager arenas, GameManager games, KitManager kits) {
@@ -48,7 +47,6 @@ public final class GameListener implements Listener {
     this.arenas = arenas;
     this.games = games;
     this.kits = kits;
-    this.allowedBuildOn = materialSet(plugin.getConfig().getStringList("game.allowed-build-on"));
     this.breakable = materialSet(plugin.getConfig().getStringList("game.breakable-blocks"));
   }
 
@@ -70,7 +68,9 @@ public final class GameListener implements Listener {
     Material placed = event.getBlockPlaced().getType();
     TeamSide team = session.team();
     if (placed == team.buildMaterial()) {
-      if (!allowedBuildOn.contains(event.getBlockAgainst().getType())) event.setCancelled(true);
+      // Building is intentionally free-form inside the arena. The only protected
+      // columns are beacon columns, so players cannot roof over a capture point.
+      if (isAboveBeacon(arena, event.getBlockPlaced().getLocation())) event.setCancelled(true);
       return;
     }
     if (placed == team.flagMaterial()) {
@@ -106,13 +106,21 @@ public final class GameListener implements Listener {
 
   @EventHandler(ignoreCancelled = true)
   public void onInteract(PlayerInteractEvent event) {
-    if (event.getHand() != null && event.getHand() != EquipmentSlot.HAND) return;
+    if (event.getHand() == null) return;
+    switch (event.getAction()) {
+      case RIGHT_CLICK_AIR, RIGHT_CLICK_BLOCK -> { }
+      default -> { return; }
+    }
+
     ItemStack item = event.getItem();
     String ability = kits.ability(item);
     if (ability == null) return;
-    if (ability.equals(KitManager.ASSASSIN_PEARL)
-        || ability.equals(KitManager.WIND_BURST)
-        || ability.equals(KitManager.WATER_BUCKET)) return;
+
+    // Buckets have a dedicated event because the clicked face determines the water source.
+    if (ability.equals(KitManager.WATER_BUCKET)) return;
+
+    // Cancelling vanilla use keeps the persistent ability item in its slot. Projectile
+    // abilities are launched by GameManager in the player's full 3D look direction.
     event.setCancelled(true);
     games.useAbility(event.getPlayer(), ability);
   }
@@ -134,10 +142,8 @@ public final class GameListener implements Listener {
     Arena arena = arenas.get(session.arenaName());
     if (arena == null || !games.isRunning(arena)) return;
     Location water = event.getBlockClicked().getRelative(event.getBlockFace()).getLocation();
-    if (!arena.contains(water)) {
-      event.setCancelled(true);
-      return;
-    }
+    event.setCancelled(true);
+    if (!arena.contains(water)) return;
     games.waterBucketUsed(player, water);
   }
 
@@ -231,6 +237,21 @@ public final class GameListener implements Listener {
     Arena arena = games.mobArena(entity);
     TeamSide team = games.mobTeam(entity);
     return arena == null || team == null ? null : new TeamContext(arena, team);
+  }
+
+  private static boolean isAboveBeacon(Arena arena, Location location) {
+    if (arena.world() == null || location == null) return false;
+    Location a = arena.cornerA();
+    Location b = arena.cornerB();
+    if (a == null || b == null) return false;
+
+    int minY = Math.min(a.getBlockY(), b.getBlockY());
+    int x = location.getBlockX();
+    int z = location.getBlockZ();
+    for (int y = location.getBlockY() - 1; y >= minY; y--) {
+      if (arena.world().getBlockAt(x, y, z).getType() == Material.BEACON) return true;
+    }
+    return false;
   }
 
   private static Set<Material> materialSet(List<String> values) {
