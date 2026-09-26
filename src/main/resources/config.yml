@@ -5,16 +5,8 @@ game:
   build-block-count: 128
   flag-block-count: 64
 
-  allowed-build-on:
-    - GRASS_BLOCK
-    - DIRT
-    - COBBLESTONE
-    - FARMLAND
-    - WHEAT
-    - CARROTS
-    - COBBLESTONE_STAIRS
-    - RED_TERRACOTTA
-    - BLUE_TERRACOTTA
+  # Team building blocks can be placed anywhere inside the arena except
+  # in a vertical column above a beacon/capture point.
 
   breakable-blocks:
     - RED_TERRACOTTA
