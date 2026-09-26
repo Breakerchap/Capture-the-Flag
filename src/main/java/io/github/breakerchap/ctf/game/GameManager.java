@@ -28,9 +28,14 @@ import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
+import org.bukkit.block.TileState;
+import org.bukkit.block.data.BlockData;
+import org.bukkit.entity.EnderPearl;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Skeleton;
+import org.bukkit.entity.WindCharge;
 import org.bukkit.entity.Zombie;
 import org.bukkit.inventory.EntityEquipment;
 import org.bukkit.inventory.ItemStack;
@@ -77,7 +82,11 @@ public final class GameManager {
 
   public void shutdown() {
     if (ticker != null) ticker.cancel();
-    for (RuntimeArena runtime : runtimes.values()) hideBossbars(runtime.arena);
+    for (RuntimeArena runtime : runtimes.values()) {
+      hideBossbars(runtime.arena);
+      restoreArena(runtime);
+      clearTemporaryEntities(runtime.arena);
+    }
     runtimes.clear();
   }
 
@@ -170,6 +179,10 @@ public final class GameManager {
     RuntimeArena runtime = runtime(arena);
     if (runtime.state != ArenaState.WAITING) return false;
 
+    ArenaSnapshot snapshot = captureArena(arena);
+    if (snapshot == null) return false;
+    runtime.snapshot = snapshot;
+
     markers.hideMarkers(arena);
     resetFlags(arena);
     runtime.redSeconds = arena.winSeconds();
@@ -219,11 +232,13 @@ public final class GameManager {
     runtime.state = ArenaState.WAITING;
     runtime.redSeconds = arena.winSeconds();
     runtime.blueSeconds = arena.winSeconds();
-    resetFlags(arena);
+    restoreArena(runtime);
+    clearTemporaryEntities(arena);
     hideBossbars(arena);
 
     for (Player player : players(arena)) {
       cooldowns.remove(player.getUniqueId());
+      clearAbilityCooldowns(player);
       restoreAssassinArmour(player);
       player.getInventory().clear();
       player.getInventory().setArmorContents(new ItemStack[4]);
@@ -268,7 +283,6 @@ public final class GameManager {
     Arena arena = arenas.get(session.arenaName());
     if (arena == null || !isRunning(arena) || cooldown(player, ability) > 0) return false;
 
-    removeAbility(player, ability);
     switch (ability) {
       case KitManager.GREAT_FEAST -> {
         setCooldown(player, ability, 1800);
@@ -281,7 +295,20 @@ public final class GameManager {
           showTitle(teammate, Component.text("Great Feast Used", NamedTextColor.GOLD));
         }
       }
-      case KitManager.LEAF_WALK -> startLeafWalk(player, arena);
+      case KitManager.LEAF_WALK -> {
+        // Datapack: 100 ticks active, then 600 ticks before it can be used again.
+        // Keep one continuous visible cooldown so the item never needs to disappear.
+        setCooldown(player, ability, 700);
+        startLeafWalk(player, arena);
+      }
+      case KitManager.ASSASSIN_PEARL -> {
+        setCooldown(player, ability, 400);
+        player.launchProjectile(EnderPearl.class);
+      }
+      case KitManager.WIND_BURST -> {
+        setCooldown(player, ability, 200);
+        player.launchProjectile(WindCharge.class);
+      }
       case KitManager.RAISE_DEAD -> {
         setCooldown(player, ability, 1800);
         raiseDead(player, arena, session.team());
@@ -303,11 +330,13 @@ public final class GameManager {
     Arena arena = arenas.get(session.arenaName());
     if (arena == null || !isRunning(arena)) return;
 
-    if (session.ctfClass() == CtfClass.ASSASSIN && "ENDER_PEARL".equals(entityTypeName)) {
-      removeAbility(player, KitManager.ASSASSIN_PEARL);
+    if (session.ctfClass() == CtfClass.ASSASSIN
+        && "ENDER_PEARL".equals(entityTypeName)
+        && cooldown(player, KitManager.ASSASSIN_PEARL) <= 0) {
       setCooldown(player, KitManager.ASSASSIN_PEARL, 400);
-    } else if (session.ctfClass() == CtfClass.MACE_BEARER && "WIND_CHARGE".equals(entityTypeName)) {
-      removeAbility(player, KitManager.WIND_BURST);
+    } else if (session.ctfClass() == CtfClass.MACE_BEARER
+        && "WIND_CHARGE".equals(entityTypeName)
+        && cooldown(player, KitManager.WIND_BURST) <= 0) {
       setCooldown(player, KitManager.WIND_BURST, 200);
     }
   }
@@ -318,9 +347,13 @@ public final class GameManager {
     Arena arena = arenas.get(session.arenaName());
     if (arena == null || !isRunning(arena) || cooldown(player, KitManager.WATER_BUCKET) > 0) return;
 
-    removeAbility(player, KitManager.WATER_BUCKET);
+    Block target = placedAt.getBlock();
+    if (!target.getType().isAir() && target.getType() != Material.WATER) return;
+    target.setType(Material.WATER, false);
     setCooldown(player, KitManager.WATER_BUCKET, 800);
-    plugin.getServer().getScheduler().runTaskLater(plugin, () -> clearWater(arena, placedAt), 100L);
+    plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+      if (isRunning(arena)) clearWater(arena, placedAt);
+    }, 100L);
   }
 
   public TeamSide mobTeam(Entity entity) {
@@ -343,6 +376,8 @@ public final class GameManager {
     restoreAssassinArmour(player);
     kits.giveKit(player, session.team(), session.ctfClass());
     initialiseCooldowns(player, session.ctfClass());
+    String ability = classAbility(session.ctfClass());
+    if (ability != null) ensureAbility(player, ability);
   }
 
   private void tick() {
@@ -367,9 +402,7 @@ public final class GameManager {
       }
 
       String ability = classAbility(session.ctfClass());
-      if (ability != null && playerCooldowns.getOrDefault(ability, 0) <= 0) {
-        ensureAbility(player, ability);
-      }
+      if (ability != null) ensureAbility(player, ability);
 
       if (session.ctfClass() == CtfClass.ASSASSIN) tickAssassinInvisibility(player);
       else restoreAssassinArmour(player);
@@ -421,11 +454,13 @@ public final class GameManager {
       player.getInventory().clear();
       player.getInventory().setArmorContents(new ItemStack[4]);
       cooldowns.remove(player.getUniqueId());
+      clearAbilityCooldowns(player);
     }
 
     hideBossbars(runtime.arena);
     plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-      resetFlags(runtime.arena);
+      restoreArena(runtime);
+      clearTemporaryEntities(runtime.arena);
       runtime.redSeconds = runtime.arena.winSeconds();
       runtime.blueSeconds = runtime.arena.winSeconds();
       runtime.state = ArenaState.WAITING;
@@ -502,6 +537,9 @@ public final class GameManager {
       case PRO -> { }
     }
     cooldowns.put(player.getUniqueId(), map);
+    for (Map.Entry<String, Integer> entry : map.entrySet()) {
+      applyVisualCooldown(player, entry.getKey(), entry.getValue());
+    }
   }
 
   private String classAbility(CtfClass ctfClass) {
@@ -520,11 +558,17 @@ public final class GameManager {
   private void ensureAbility(Player player, String ability) {
     if (hasAbility(player, ability)) return;
     ItemStack item = kits.abilityItem(ability);
-    if (KitManager.WIND_BURST.equals(ability)) {
-      player.getInventory().setItemInOffHand(item);
-    } else {
+
+    // Preserve the datapack's convenient last-hotbar-slot placement when it is free,
+    // but never destroy whatever the player already has there.
+    ItemStack preferred = player.getInventory().getItem(8);
+    if (preferred == null || preferred.getType().isAir()) {
       player.getInventory().setItem(8, item);
+      return;
     }
+
+    // addItem only uses empty/mergeable slots and therefore cannot overwrite an item.
+    player.getInventory().addItem(item);
   }
 
   private boolean hasAbility(Player player, String ability) {
@@ -546,10 +590,30 @@ public final class GameManager {
 
   private void setCooldown(Player player, String ability, int ticks) {
     cooldowns.computeIfAbsent(player.getUniqueId(), ignored -> new HashMap<>()).put(ability, ticks);
+    applyVisualCooldown(player, ability, ticks);
+  }
+
+  private void applyVisualCooldown(Player player, String ability, int ticks) {
+    Material material = kits.abilityItem(ability).getType();
+    player.setCooldown(material, Math.max(0, ticks));
+  }
+
+  private void clearAbilityCooldowns(Player player) {
+    for (String ability : List.of(
+        KitManager.GREAT_FEAST,
+        KitManager.LEAF_WALK,
+        KitManager.RAISE_DEAD,
+        KitManager.BATWINGS,
+        KitManager.WIND_BURST,
+        KitManager.ASSASSIN_PEARL,
+        KitManager.WATER_BUCKET
+    )) {
+      player.setCooldown(kits.abilityItem(ability).getType(), 0);
+    }
   }
 
   private void startLeafWalk(Player player, Arena arena) {
-    Set<Block> placed = new HashSet<>();
+    Set<Block> platform = new HashSet<>();
 
     new BukkitRunnable() {
       private int age;
@@ -560,55 +624,85 @@ public final class GameManager {
         if (!sameRunningArena(player, arena)
             || current == null
             || current.ctfClass() != CtfClass.HUNTER) {
-          finishTrail();
+          clearPlatform();
           cancel();
           return;
         }
 
-        int y = player.getLocation().getBlockY() - 1;
-        int x = player.getLocation().getBlockX();
-        int z = player.getLocation().getBlockZ();
-        for (int dx = -1; dx <= 1; dx++) {
-          for (int dz = -1; dz <= 1; dz++) {
-            Block block = arena.world().getBlockAt(x + dx, y, z + dz);
-            if (arena.contains(block.getLocation()) && block.getType().isAir()) {
-              block.setType(Material.DARK_OAK_LEAVES, false);
-              placed.add(block);
+        // Leaves cease to exist as soon as they are no longer the current platform.
+        clearPlatform();
+
+        if (player.isSneaking()) {
+          // No platform while sneaking: the player drops through it and can release
+          // sneak at the desired height to immediately get a new platform.
+          Vector velocity = player.getVelocity();
+          if (velocity.getY() > -0.35) {
+            velocity.setY(-0.35);
+            player.setVelocity(velocity);
+          }
+        } else {
+          int y = player.getLocation().getBlockY() - 1;
+          int x = player.getLocation().getBlockX();
+          int z = player.getLocation().getBlockZ();
+          for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+              Block block = arena.world().getBlockAt(x + dx, y, z + dz);
+              if (arena.contains(block.getLocation()) && block.getType().isAir()) {
+                block.setType(Material.DARK_OAK_LEAVES, false);
+                platform.add(block);
+              }
             }
           }
+          // Normal jumping raises the player's block Y; on the next tick the platform
+          // is rebuilt one block higher, so jump climbs and sneak descends.
         }
 
         age++;
         if (age >= 100) {
-          setCooldown(player, KitManager.LEAF_WALK, 600);
-          finishTrail();
+          clearPlatform();
           cancel();
         }
       }
 
-      private void finishTrail() {
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-          for (Block block : placed) {
-            if (block.getType() == Material.DARK_OAK_LEAVES) {
-              block.setType(Material.AIR, false);
-            }
+      private void clearPlatform() {
+        for (Block block : platform) {
+          if (block.getType() == Material.DARK_OAK_LEAVES) {
+            block.setType(Material.AIR, false);
           }
-        }, 60L);
+        }
+        platform.clear();
       }
     }.runTaskTimer(plugin, 0L, 1L);
   }
 
   private void raiseDead(Player player, Arena arena, TeamSide team) {
-    Vector forward = player.getLocation().getDirection().setY(0);
-    if (forward.lengthSquared() < 0.01) forward = new Vector(0, 0, 1);
-    forward.normalize();
-    Vector right = new Vector(-forward.getZ(), 0, forward.getX()).normalize();
-    Location origin = player.getLocation().clone().add(0, 1.0, 0);
+    // Match the datapack's local (^) coordinates, including pitch, so looking
+    // upwards or downwards works just as reliably as looking horizontally.
+    Vector forward = player.getEyeLocation().getDirection().normalize();
+    double yaw = Math.toRadians(player.getLocation().getYaw());
+    Vector left = new Vector(Math.cos(yaw), 0, Math.sin(yaw)).normalize();
+    Vector up = forward.clone().crossProduct(left).normalize();
+    Location origin = player.getLocation();
 
-    spawnZombie(arena, team, origin.clone().add(forward.clone().multiply(1.5)));
-    spawnZombie(arena, team, origin.clone().subtract(forward.clone().multiply(1.5)));
-    spawnSkeleton(arena, team, origin.clone().add(right.clone().multiply(1.5)));
-    spawnSkeleton(arena, team, origin.clone().subtract(right.clone().multiply(1.5)));
+    spawnZombie(arena, team, localOffset(origin, left, up, forward, 0, 1.5, 1.5));
+    spawnZombie(arena, team, localOffset(origin, left, up, forward, 0, 1.5, -1.5));
+    spawnSkeleton(arena, team, localOffset(origin, left, up, forward, 1.5, 1.5, 0));
+    spawnSkeleton(arena, team, localOffset(origin, left, up, forward, -1.5, 1.5, 0));
+  }
+
+  private static Location localOffset(
+      Location origin,
+      Vector left,
+      Vector up,
+      Vector forward,
+      double localX,
+      double localY,
+      double localZ
+  ) {
+    return origin.clone()
+        .add(left.clone().multiply(localX))
+        .add(up.clone().multiply(localY))
+        .add(forward.clone().multiply(localZ));
   }
 
   private void spawnZombie(Arena arena, TeamSide team, Location location) {
@@ -704,6 +798,102 @@ public final class GameManager {
     }
   }
 
+  public boolean resetArena(Arena arena) {
+    RuntimeArena runtime = runtime(arena);
+    if (runtime.snapshot == null) return false;
+    restoreArena(runtime);
+    clearTemporaryEntities(arena);
+    return true;
+  }
+
+  private ArenaSnapshot captureArena(Arena arena) {
+    World world = arena.world();
+    Location a = arena.cornerA();
+    Location b = arena.cornerB();
+    if (world == null || a == null || b == null) return null;
+
+    int minX = Math.min(a.getBlockX(), b.getBlockX());
+    int minY = Math.min(a.getBlockY(), b.getBlockY());
+    int minZ = Math.min(a.getBlockZ(), b.getBlockZ());
+    int maxX = Math.max(a.getBlockX(), b.getBlockX());
+    int maxY = Math.max(a.getBlockY(), b.getBlockY());
+    int maxZ = Math.max(a.getBlockZ(), b.getBlockZ());
+
+    long volume = (long) (maxX - minX + 1)
+        * (maxY - minY + 1)
+        * (maxZ - minZ + 1);
+    if (volume > Integer.MAX_VALUE) {
+      plugin.getLogger().severe("Arena '" + arena.name() + "' is too large to snapshot safely.");
+      return null;
+    }
+
+    Map<String, Integer> paletteIds = new HashMap<>();
+    List<BlockData> palette = new ArrayList<>();
+    int[] blocks = new int[(int) volume];
+    List<BlockState> tileStates = new ArrayList<>();
+    int index = 0;
+
+    for (int y = minY; y <= maxY; y++) {
+      for (int z = minZ; z <= maxZ; z++) {
+        for (int x = minX; x <= maxX; x++) {
+          Block block = world.getBlockAt(x, y, z);
+          BlockData data = block.getBlockData();
+          String key = data.getAsString();
+          Integer paletteIndex = paletteIds.get(key);
+          if (paletteIndex == null) {
+            paletteIndex = palette.size();
+            paletteIds.put(key, paletteIndex);
+            palette.add(data.clone());
+          }
+          blocks[index++] = paletteIndex;
+
+          BlockState state = block.getState();
+          if (state instanceof TileState) tileStates.add(state);
+        }
+      }
+    }
+
+    return new ArenaSnapshot(
+        world,
+        minX,
+        minY,
+        minZ,
+        maxX,
+        maxY,
+        maxZ,
+        palette,
+        blocks,
+        tileStates
+    );
+  }
+
+  private void restoreArena(RuntimeArena runtime) {
+    ArenaSnapshot snapshot = runtime.snapshot;
+    if (snapshot == null) return;
+
+    int index = 0;
+    for (int y = snapshot.minY; y <= snapshot.maxY; y++) {
+      for (int z = snapshot.minZ; z <= snapshot.maxZ; z++) {
+        for (int x = snapshot.minX; x <= snapshot.maxX; x++) {
+          BlockData data = snapshot.palette.get(snapshot.blocks[index++]);
+          snapshot.world.getBlockAt(x, y, z).setBlockData(data, false);
+        }
+      }
+    }
+
+    // Restore inventories/sign text/etc. after the underlying block types exist again.
+    for (BlockState state : snapshot.tileStates) state.update(true, false);
+  }
+
+  private void clearTemporaryEntities(Arena arena) {
+    World world = arena.world();
+    if (world == null) return;
+    for (Entity entity : new ArrayList<>(world.getEntities())) {
+      String arenaName = entity.getPersistentDataContainer().get(mobArenaKey, PersistentDataType.STRING);
+      if (arena.name().equalsIgnoreCase(arenaName)) entity.remove();
+    }
+  }
+
   private RuntimeArena runtime(Arena arena) {
     return runtimes.computeIfAbsent(
         arena.name().toLowerCase(Locale.ROOT),
@@ -759,6 +949,43 @@ public final class GameManager {
         && player.isOnline();
   }
 
+  private static final class ArenaSnapshot {
+    private final World world;
+    private final int minX;
+    private final int minY;
+    private final int minZ;
+    private final int maxX;
+    private final int maxY;
+    private final int maxZ;
+    private final List<BlockData> palette;
+    private final int[] blocks;
+    private final List<BlockState> tileStates;
+
+    private ArenaSnapshot(
+        World world,
+        int minX,
+        int minY,
+        int minZ,
+        int maxX,
+        int maxY,
+        int maxZ,
+        List<BlockData> palette,
+        int[] blocks,
+        List<BlockState> tileStates
+    ) {
+      this.world = world;
+      this.minX = minX;
+      this.minY = minY;
+      this.minZ = minZ;
+      this.maxX = maxX;
+      this.maxY = maxY;
+      this.maxZ = maxZ;
+      this.palette = List.copyOf(palette);
+      this.blocks = blocks;
+      this.tileStates = List.copyOf(tileStates);
+    }
+  }
+
   private static final class RuntimeArena {
     private final Arena arena;
     private ArenaState state = ArenaState.WAITING;
@@ -766,6 +993,7 @@ public final class GameManager {
     private int blueSeconds;
     private final BossBar redBar;
     private final BossBar blueBar;
+    private ArenaSnapshot snapshot;
 
     private RuntimeArena(Arena arena) {
       this.arena = arena;
