@@ -355,7 +355,7 @@ public final class GameManager {
     setCooldown(player, KitManager.WATER_BUCKET, 800);
     plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
       if (isRunning(arena)) clearWater(arena, placedAt);
-    }, 100L);
+    }, 110L);
   }
 
   public TeamSide mobTeam(Entity entity) {
