@@ -23,6 +23,7 @@ public final class CaptureTheFlagPlugin extends JavaPlugin {
     markerManager = new MarkerManager(this, arenaManager);
     kitManager = new KitManager(this);
     gameManager = new GameManager(this, arenaManager, markerManager, kitManager);
+    gameManager.recoverInterruptedGames();
 
     CtfCommand ctfCommand = new CtfCommand(this, arenaManager, markerManager, gameManager, kitManager);
     PluginCommand command = getCommand("ctf");
