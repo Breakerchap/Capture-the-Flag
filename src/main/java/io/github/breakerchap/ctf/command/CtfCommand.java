@@ -51,6 +51,7 @@ public final class CtfCommand implements TabExecutor {
       case "class" -> classCommand(sender, args);
       case "start" -> start(sender, args);
       case "stop" -> stop(sender, args);
+      case "reset" -> reset(sender, args);
       case "reload" -> reload(sender);
       default -> help(sender);
     }
@@ -298,6 +299,28 @@ public final class CtfCommand implements TabExecutor {
     sender.sendMessage(Component.text("Stopped " + arena.name() + ".", NamedTextColor.YELLOW));
   }
 
+  private void reset(CommandSender sender, String[] args) {
+    if (!admin(sender)) return;
+    if (args.length < 2) {
+      sender.sendMessage(Component.text("Usage: /ctf reset <arena>", NamedTextColor.RED));
+      return;
+    }
+    Arena arena = arenas.get(args[1]);
+    if (arena == null) {
+      sender.sendMessage(Component.text("Arena not found.", NamedTextColor.RED));
+      return;
+    }
+
+    if (games.state(arena) != ArenaState.WAITING) games.stopGame(arena);
+    boolean restored = games.resetArena(arena);
+    sender.sendMessage(Component.text(
+        restored
+            ? "Restored " + arena.name() + " to its pre-game snapshot."
+            : "No pre-game snapshot exists yet. Start a game once to create one.",
+        restored ? NamedTextColor.GREEN : NamedTextColor.YELLOW
+    ));
+  }
+
   private void reload(CommandSender sender) {
     if (!admin(sender)) return;
     plugin.reloadConfig();
@@ -336,7 +359,7 @@ public final class CtfCommand implements TabExecutor {
     sender.sendMessage(Component.text("/ctf leave - leave your arena", NamedTextColor.GRAY));
     if (sender.hasPermission("ctf.admin")) {
       sender.sendMessage(Component.text("/ctf arena ... - configure arenas", NamedTextColor.GRAY));
-      sender.sendMessage(Component.text("/ctf start <arena> | /ctf stop <arena>", NamedTextColor.GRAY));
+      sender.sendMessage(Component.text("/ctf start <arena> | /ctf stop <arena> | /ctf reset <arena>", NamedTextColor.GRAY));
     }
   }
 
@@ -364,13 +387,17 @@ public final class CtfCommand implements TabExecutor {
 
   @Override
   public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-    if (args.length == 1) return filter(List.of("help", "arena", "join", "leave", "class", "start", "stop", "reload"), args[0]);
+    if (args.length == 1) return filter(List.of("help", "arena", "join", "leave", "class", "start", "stop", "reset", "reload"), args[0]);
     if (args[0].equalsIgnoreCase("join")) {
       if (args.length == 2) return filter(arenas.names(), args[1]);
       if (args.length == 3) return filter(List.of("red", "blue"), args[2]);
     }
     if (args[0].equalsIgnoreCase("class") && args.length == 2) return filter(classNames(), args[1]);
-    if ((args[0].equalsIgnoreCase("start") || args[0].equalsIgnoreCase("stop")) && args.length == 2) return filter(arenas.names(), args[1]);
+    if ((args[0].equalsIgnoreCase("start")
+        || args[0].equalsIgnoreCase("stop")
+        || args[0].equalsIgnoreCase("reset")) && args.length == 2) {
+      return filter(arenas.names(), args[1]);
+    }
     if (args[0].equalsIgnoreCase("arena")) {
       if (args.length == 2) return filter(List.of("create", "delete", "list", "info", "validate", "markers", "showmarkers", "hidemarkers", "removeflag", "clearflags", "setrequired", "setwinseconds", "setneutral"), args[1]);
       if (args.length == 3 && !args[1].equalsIgnoreCase("create") && !args[1].equalsIgnoreCase("list")) return filter(arenas.names(), args[2]);
