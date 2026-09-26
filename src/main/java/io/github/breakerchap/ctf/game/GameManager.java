@@ -10,6 +10,12 @@ import io.github.breakerchap.ctf.marker.MarkerManager;
 import io.github.breakerchap.ctf.player.CtfClass;
 import io.github.breakerchap.ctf.player.PlayerSession;
 import io.github.breakerchap.ctf.player.TeamSide;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -18,10 +24,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.title.Title;
+import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -29,6 +38,7 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
+import org.bukkit.block.Container;
 import org.bukkit.block.TileState;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.entity.EnderPearl;
@@ -46,6 +56,8 @@ import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
+import org.bukkit.util.io.BukkitObjectInputStream;
+import org.bukkit.util.io.BukkitObjectOutputStream;
 
 public final class GameManager {
   private final CaptureTheFlagPlugin plugin;
@@ -54,8 +66,15 @@ public final class GameManager {
   private final KitManager kits;
   private final Map<UUID, PlayerSession> sessions = new HashMap<>();
   private final Map<String, RuntimeArena> runtimes = new HashMap<>();
+  private static final int SNAPSHOT_MAGIC = 0x43544653;
+  private static final int SNAPSHOT_VERSION = 1;
+
   private final Map<UUID, Map<String, Integer>> cooldowns = new HashMap<>();
   private final Map<UUID, ItemStack[]> hiddenAssassinArmour = new HashMap<>();
+  private final Map<BlockKey, WaterCell> abilityWater = new HashMap<>();
+  private final Map<UUID, Set<BlockKey>> waterUses = new HashMap<>();
+  private final Map<BlockKey, LeafCell> leafWalkLeaves = new HashMap<>();
+  private final Map<UUID, MatchStats> matchStats = new HashMap<>();
   private final NamespacedKey mobArenaKey;
   private final NamespacedKey mobTeamKey;
   private BukkitTask ticker;
@@ -80,15 +99,46 @@ public final class GameManager {
     ticker = plugin.getServer().getScheduler().runTaskTimer(plugin, this::tick, 1L, 1L);
   }
 
+  public void recoverInterruptedGames() {
+    for (Arena arena : arenas.all()) {
+      File file = snapshotFile(arena);
+      if (!file.exists()) continue;
+
+      ArenaSnapshot snapshot = loadSnapshot(file);
+      if (snapshot == null) {
+        plugin.getLogger().severe(
+            "Could not recover interrupted CTF arena '" + arena.name()
+                + "'. Snapshot kept at " + file.getAbsolutePath()
+        );
+        continue;
+      }
+
+      RuntimeArena runtime = runtime(arena);
+      runtime.snapshot = snapshot;
+      clearTransientBlocks(arena);
+      restoreArena(runtime);
+      clearTemporaryEntities(arena);
+      deleteSnapshotFile(arena);
+      plugin.getLogger().warning(
+          "Recovered arena '" + arena.name() + "' from an interrupted match snapshot."
+      );
+    }
+  }
+
   public void shutdown() {
     if (ticker != null) ticker.cancel();
     for (RuntimeArena runtime : runtimes.values()) {
       hideBossbars(runtime.arena);
       if (runtime.state != ArenaState.WAITING) {
+        clearTransientBlocks(runtime.arena);
         restoreArena(runtime);
         clearTemporaryEntities(runtime.arena);
+        deleteSnapshotFile(runtime.arena);
       }
     }
+    abilityWater.clear();
+    waterUses.clear();
+    leafWalkLeaves.clear();
     runtimes.clear();
   }
 
@@ -162,6 +212,53 @@ public final class GameManager {
     if (message) player.sendMessage(Component.text("Left Capture the Flag.", NamedTextColor.YELLOW));
   }
 
+  public void disconnect(Player player) {
+    PlayerSession session = session(player);
+    if (session == null) return;
+    Arena arena = arenas.get(session.arenaName());
+    restoreAssassinArmour(player);
+    if (arena != null) hideBossbars(player, runtime(arena));
+  }
+
+  public void reconnect(Player player) {
+    PlayerSession session = session(player);
+    if (session == null) return;
+    Arena arena = arenas.get(session.arenaName());
+    if (arena == null) {
+      sessions.remove(player.getUniqueId());
+      cooldowns.remove(player.getUniqueId());
+      return;
+    }
+
+    RuntimeArena runtime = runtime(arena);
+    player.sendMessage(Component.text(
+        "Reconnected to " + arena.name() + " on the " + session.team().displayName() + " team.",
+        NamedTextColor.GRAY
+    ));
+
+    switch (runtime.state) {
+      case COUNTDOWN -> {
+        showBossbars(player, runtime);
+        prepareForCountdown(player);
+      }
+      case RUNNING -> {
+        showBossbars(player, runtime);
+        player.setGameMode(GameMode.SURVIVAL);
+        String ability = classAbility(session.ctfClass());
+        if (ability != null) {
+          ensureAbility(player, ability);
+          applyVisualCooldown(player, ability, cooldown(player, ability));
+          updateAbilityLore(player, ability);
+        }
+      }
+      case FINISHED -> {
+        player.setGameMode(GameMode.SPECTATOR);
+        showPersonalResults(player);
+      }
+      case WAITING -> returnPlayerToBase(player, arena);
+    }
+  }
+
   public void setClass(Player player, CtfClass ctfClass) {
     PlayerSession session = session(player);
     if (session == null) return;
@@ -181,10 +278,12 @@ public final class GameManager {
     RuntimeArena runtime = runtime(arena);
     if (runtime.state != ArenaState.WAITING) return false;
 
+    clearTransientBlocks(arena);
     ArenaSnapshot snapshot = captureArena(arena);
-    if (snapshot == null) return false;
+    if (snapshot == null || !persistSnapshot(arena, snapshot)) return false;
     runtime.snapshot = snapshot;
 
+    clearMatchStats(arena);
     markers.hideMarkers(arena);
     resetFlags(arena);
     runtime.redSeconds = arena.winSeconds();
@@ -231,20 +330,25 @@ public final class GameManager {
 
   public void stopGame(Arena arena) {
     RuntimeArena runtime = runtime(arena);
+    boolean wasActive = runtime.state != ArenaState.WAITING;
+
     runtime.state = ArenaState.WAITING;
     runtime.redSeconds = arena.winSeconds();
     runtime.blueSeconds = arena.winSeconds();
-    restoreArena(runtime);
-    clearTemporaryEntities(arena);
+
+    if (wasActive) {
+      clearTransientBlocks(arena);
+      restoreArena(runtime);
+      clearTemporaryEntities(arena);
+      deleteSnapshotFile(arena);
+    }
     hideBossbars(arena);
 
     for (Player player : players(arena)) {
       cooldowns.remove(player.getUniqueId());
       clearAbilityCooldowns(player);
       restoreAssassinArmour(player);
-      player.getInventory().clear();
-      player.getInventory().setArmorContents(new ItemStack[4]);
-      player.setGameMode(GameMode.ADVENTURE);
+      returnPlayerToBase(player, arena);
       player.sendMessage(Component.text("The CTF game was stopped.", NamedTextColor.YELLOW));
     }
   }
@@ -283,7 +387,13 @@ public final class GameManager {
     PlayerSession session = session(player);
     if (session == null) return false;
     Arena arena = arenas.get(session.arenaName());
-    if (arena == null || !isRunning(arena) || cooldown(player, ability) > 0) return false;
+    if (arena == null || !isRunning(arena)) return false;
+
+    int remaining = cooldown(player, ability);
+    if (remaining > 0) {
+      sendCooldownFeedback(player, remaining);
+      return false;
+    }
 
     switch (ability) {
       case KitManager.GREAT_FEAST -> {
@@ -347,15 +457,91 @@ public final class GameManager {
     PlayerSession session = session(player);
     if (session == null || session.ctfClass() != CtfClass.SWIMMER) return;
     Arena arena = arenas.get(session.arenaName());
-    if (arena == null || !isRunning(arena) || cooldown(player, KitManager.WATER_BUCKET) > 0) return;
+    if (arena == null || !isRunning(arena)) return;
+
+    int remaining = cooldown(player, KitManager.WATER_BUCKET);
+    if (remaining > 0) {
+      sendCooldownFeedback(player, remaining);
+      return;
+    }
 
     Block target = placedAt.getBlock();
-    if (!target.getType().isAir() && target.getType() != Material.WATER) return;
+    if (!target.getType().isAir() && !abilityWater.containsKey(blockKey(target))) return;
+
+    UUID useId = UUID.randomUUID();
+    WaterCell cell = abilityWater.get(blockKey(target));
+    if (cell == null) {
+      cell = new WaterCell(arena.name(), target.getBlockData().clone());
+      abilityWater.put(blockKey(target), cell);
+    } else if (!cell.arenaName.equalsIgnoreCase(arena.name())) {
+      return;
+    }
+
+    claimWater(useId, blockKey(target), cell);
     target.setType(Material.WATER, false);
     setCooldown(player, KitManager.WATER_BUCKET, 800);
-    plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-      if (isRunning(arena)) clearWater(arena, placedAt);
-    }, 110L);
+
+    UUID scheduledUse = useId;
+    plugin.getServer().getScheduler().runTaskLater(
+        plugin,
+        () -> cleanupWaterUse(scheduledUse),
+        110L
+    );
+  }
+
+  public void waterFlow(Block from, Block to) {
+    WaterCell source = abilityWater.get(blockKey(from));
+    if (source == null || from.getType() != Material.WATER) return;
+
+    Arena arena = arenas.get(source.arenaName);
+    if (arena == null || !isRunning(arena) || !arena.contains(to.getLocation())) return;
+
+    BlockKey destinationKey = blockKey(to);
+    WaterCell destination = abilityWater.get(destinationKey);
+
+    // Never claim decorative/pre-existing water. We only propagate into blocks that
+    // this ability is actually causing to become water, or water already owned by it.
+    if (destination == null) {
+      if (!to.getType().isAir()) return;
+      destination = new WaterCell(arena.name(), to.getBlockData().clone());
+      abilityWater.put(destinationKey, destination);
+    }
+
+    if (!destination.arenaName.equalsIgnoreCase(arena.name())) return;
+    for (UUID owner : new HashSet<>(source.owners)) {
+      claimWater(owner, destinationKey, destination);
+    }
+  }
+
+  private void claimWater(UUID useId, BlockKey key, WaterCell cell) {
+    cell.owners.add(useId);
+    waterUses.computeIfAbsent(useId, ignored -> new HashSet<>()).add(key);
+  }
+
+  private void cleanupWaterUse(UUID useId) {
+    Set<BlockKey> cells = waterUses.remove(useId);
+    if (cells == null) return;
+
+    for (BlockKey key : cells) {
+      WaterCell cell = abilityWater.get(key);
+      if (cell == null) continue;
+      cell.owners.remove(useId);
+      if (!cell.owners.isEmpty()) continue;
+
+      Block block = blockForKey(key);
+      if (block != null && block.getType() == Material.WATER) {
+        block.setBlockData(cell.original.clone(), false);
+      }
+      abilityWater.remove(key);
+    }
+  }
+
+  private void clearAbilityWater(Arena arena) {
+    Set<UUID> uses = new HashSet<>();
+    for (WaterCell cell : abilityWater.values()) {
+      if (cell.arenaName.equalsIgnoreCase(arena.name())) uses.addAll(cell.owners);
+    }
+    for (UUID use : uses) cleanupWaterUse(use);
   }
 
   public TeamSide mobTeam(Entity entity) {
@@ -404,7 +590,10 @@ public final class GameManager {
       }
 
       String ability = classAbility(session.ctfClass());
-      if (ability != null) ensureAbility(player, ability);
+      if (ability != null) {
+        ensureAbility(player, ability);
+        if (ticks % 20L == 0L) updateAbilityLore(player, ability);
+      }
 
       if (session.ctfClass() == CtfClass.ASSASSIN) tickAssassinInvisibility(player);
       else restoreAssassinArmour(player);
@@ -440,6 +629,9 @@ public final class GameManager {
     if (runtime.state != ArenaState.RUNNING) return;
     runtime.state = ArenaState.FINISHED;
 
+    int redFlags = countFlags(runtime.arena, TeamSide.RED);
+    int blueFlags = countFlags(runtime.arena, TeamSide.BLUE);
+
     Component title;
     if (runtime.redSeconds <= 0 && runtime.blueSeconds <= 0) {
       title = Component.text("Draw!", NamedTextColor.GOLD);
@@ -451,6 +643,13 @@ public final class GameManager {
 
     for (Player player : players(runtime.arena)) {
       showTitle(player, title);
+      player.sendMessage(Component.text("Match Results", NamedTextColor.GOLD)
+          .append(Component.text("  Red flags: ", NamedTextColor.GRAY))
+          .append(Component.text(redFlags, NamedTextColor.RED))
+          .append(Component.text(" | Blue flags: ", NamedTextColor.GRAY))
+          .append(Component.text(blueFlags, NamedTextColor.BLUE)));
+      showPersonalResults(player);
+
       restoreAssassinArmour(player);
       player.setGameMode(GameMode.SPECTATOR);
       player.getInventory().clear();
@@ -461,12 +660,18 @@ public final class GameManager {
 
     hideBossbars(runtime.arena);
     plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+      clearTransientBlocks(runtime.arena);
       restoreArena(runtime);
       clearTemporaryEntities(runtime.arena);
+      deleteSnapshotFile(runtime.arena);
       runtime.redSeconds = runtime.arena.winSeconds();
       runtime.blueSeconds = runtime.arena.winSeconds();
       runtime.state = ArenaState.WAITING;
-    }, 60L);
+
+      for (Player player : players(runtime.arena)) {
+        returnPlayerToBase(player, runtime.arena);
+      }
+    }, 100L);
   }
 
   private int countFlags(Arena arena, TeamSide team) {
@@ -560,6 +765,7 @@ public final class GameManager {
   private void ensureAbility(Player player, String ability) {
     if (hasAbility(player, ability)) return;
     ItemStack item = kits.abilityItem(ability);
+    applyAbilityLore(item, cooldown(player, ability));
 
     // Preserve the datapack's convenient last-hotbar-slot placement when it is free,
     // but never destroy whatever the player already has there.
@@ -571,6 +777,31 @@ public final class GameManager {
 
     // addItem only uses empty/mergeable slots and therefore cannot overwrite an item.
     player.getInventory().addItem(item);
+  }
+
+  private void updateAbilityLore(Player player, String ability) {
+    for (ItemStack item : player.getInventory().getContents()) {
+      if (ability.equals(kits.ability(item))) applyAbilityLore(item, cooldown(player, ability));
+    }
+    ItemStack offhand = player.getInventory().getItemInOffHand();
+    if (ability.equals(kits.ability(offhand))) applyAbilityLore(offhand, cooldown(player, ability));
+  }
+
+  private void applyAbilityLore(ItemStack item, int remainingTicks) {
+    if (item == null || item.getType().isAir()) return;
+    ItemMeta meta = item.getItemMeta();
+    if (remainingTicks <= 0) {
+      meta.lore(List.of(Component.text("Ready", NamedTextColor.GREEN)));
+    } else {
+      String seconds = String.format(Locale.ROOT, "%.1f", remainingTicks / 20.0);
+      meta.lore(List.of(Component.text("Cooldown: " + seconds + "s", NamedTextColor.GRAY)));
+    }
+    item.setItemMeta(meta);
+  }
+
+  private void sendCooldownFeedback(Player player, int remainingTicks) {
+    String seconds = String.format(Locale.ROOT, "%.1f", remainingTicks / 20.0);
+    player.sendActionBar(Component.text("Ability ready in " + seconds + "s", NamedTextColor.YELLOW));
   }
 
   private boolean hasAbility(Player player, String ability) {
@@ -593,6 +824,7 @@ public final class GameManager {
   private void setCooldown(Player player, String ability, int ticks) {
     cooldowns.computeIfAbsent(player.getUniqueId(), ignored -> new HashMap<>()).put(ability, ticks);
     applyVisualCooldown(player, ability, ticks);
+    updateAbilityLore(player, ability);
   }
 
   private void applyVisualCooldown(Player player, String ability, int ticks) {
@@ -615,7 +847,7 @@ public final class GameManager {
   }
 
   private void startLeafWalk(Player player, Arena arena) {
-    Set<Block> platform = new HashSet<>();
+    Set<BlockKey> platform = new HashSet<>();
 
     new BukkitRunnable() {
       private int age;
@@ -626,17 +858,15 @@ public final class GameManager {
         if (!sameRunningArena(player, arena)
             || current == null
             || current.ctfClass() != CtfClass.HUNTER) {
-          clearPlatform();
+          releaseLeafPlatform(platform);
           cancel();
           return;
         }
 
         // Leaves cease to exist as soon as they are no longer the current platform.
-        clearPlatform();
+        releaseLeafPlatform(platform);
 
         if (player.isSneaking()) {
-          // No platform while sneaking: the player drops through it and can release
-          // sneak at the desired height to immediately get a new platform.
           Vector velocity = player.getVelocity();
           if (velocity.getY() > -0.35) {
             velocity.setY(-0.35);
@@ -649,32 +879,63 @@ public final class GameManager {
           for (int dx = -1; dx <= 1; dx++) {
             for (int dz = -1; dz <= 1; dz++) {
               Block block = arena.world().getBlockAt(x + dx, y, z + dz);
-              if (arena.contains(block.getLocation()) && block.getType().isAir()) {
-                block.setType(Material.DARK_OAK_LEAVES, false);
-                platform.add(block);
-              }
+              if (arena.contains(block.getLocation())) claimLeaf(arena, block, platform);
             }
           }
-          // Normal jumping raises the player's block Y; on the next tick the platform
-          // is rebuilt one block higher, so jump climbs and sneak descends.
         }
 
         age++;
         if (age >= 100) {
-          clearPlatform();
+          releaseLeafPlatform(platform);
           cancel();
         }
       }
-
-      private void clearPlatform() {
-        for (Block block : platform) {
-          if (block.getType() == Material.DARK_OAK_LEAVES) {
-            block.setType(Material.AIR, false);
-          }
-        }
-        platform.clear();
-      }
     }.runTaskTimer(plugin, 0L, 1L);
+  }
+
+  private void claimLeaf(Arena arena, Block block, Set<BlockKey> platform) {
+    BlockKey key = blockKey(block);
+    LeafCell existing = leafWalkLeaves.get(key);
+
+    if (existing != null) {
+      if (!existing.arenaName.equalsIgnoreCase(arena.name())
+          || block.getType() != Material.DARK_OAK_LEAVES) return;
+      existing.references++;
+      platform.add(key);
+      return;
+    }
+
+    if (!block.getType().isAir()) return;
+    block.setType(Material.DARK_OAK_LEAVES, false);
+    leafWalkLeaves.put(key, new LeafCell(arena.name()));
+    platform.add(key);
+  }
+
+  private void releaseLeafPlatform(Set<BlockKey> platform) {
+    for (BlockKey key : new HashSet<>(platform)) {
+      LeafCell cell = leafWalkLeaves.get(key);
+      if (cell == null) continue;
+      cell.references--;
+      if (cell.references > 0) continue;
+
+      Block block = blockForKey(key);
+      if (block != null && block.getType() == Material.DARK_OAK_LEAVES) {
+        block.setType(Material.AIR, false);
+      }
+      leafWalkLeaves.remove(key);
+    }
+    platform.clear();
+  }
+
+  private void clearLeafWalkArena(Arena arena) {
+    for (Map.Entry<BlockKey, LeafCell> entry : new ArrayList<>(leafWalkLeaves.entrySet())) {
+      if (!entry.getValue().arenaName.equalsIgnoreCase(arena.name())) continue;
+      Block block = blockForKey(entry.getKey());
+      if (block != null && block.getType() == Material.DARK_OAK_LEAVES) {
+        block.setType(Material.AIR, false);
+      }
+      leafWalkLeaves.remove(entry.getKey());
+    }
   }
 
   private void raiseDead(Player player, Arena arena, TeamSide team) {
@@ -746,24 +1007,57 @@ public final class GameManager {
     }, 140L);
   }
 
-  private void clearWater(Arena arena, Location source) {
-    if (source == null
-        || source.getWorld() == null
-        || !source.getWorld().equals(arena.world())) return;
+  private void clearTransientBlocks(Arena arena) {
+    clearAbilityWater(arena);
+    clearLeafWalkArena(arena);
+  }
 
-    int baseX = source.getBlockX();
-    int baseY = source.getBlockY();
-    int baseZ = source.getBlockZ();
-    for (int x = baseX - 6; x <= baseX + 6; x++) {
-      for (int y = baseY - 4; y <= baseY + 7; y++) {
-        for (int z = baseZ - 6; z <= baseZ + 6; z++) {
-          Block block = arena.world().getBlockAt(x, y, z);
-          if (arena.contains(block.getLocation()) && block.getType() == Material.WATER) {
-            block.setType(Material.AIR, false);
-          }
-        }
+  public void recordDeath(Player victim, Player killer) {
+    Arena arena = arenaFor(victim);
+    if (arena == null || !isRunning(arena)) return;
+
+    stats(victim.getUniqueId()).deaths++;
+    if (killer == null || killer.getUniqueId().equals(victim.getUniqueId())) return;
+
+    PlayerSession killerSession = session(killer);
+    PlayerSession victimSession = session(victim);
+    if (killerSession == null || victimSession == null) return;
+    if (!killerSession.arenaName().equalsIgnoreCase(victimSession.arenaName())) return;
+    if (killerSession.team() == victimSession.team()) return;
+    stats(killer.getUniqueId()).kills++;
+  }
+
+  private MatchStats stats(UUID playerId) {
+    return matchStats.computeIfAbsent(playerId, ignored -> new MatchStats());
+  }
+
+  private void clearMatchStats(Arena arena) {
+    for (Map.Entry<UUID, PlayerSession> entry : sessions.entrySet()) {
+      if (entry.getValue().arenaName().equalsIgnoreCase(arena.name())) {
+        matchStats.remove(entry.getKey());
       }
     }
+  }
+
+  private void showPersonalResults(Player player) {
+    MatchStats stats = this.stats(player.getUniqueId());
+    player.sendMessage(Component.text(
+        "Your match: " + stats.kills + " kills | " + stats.deaths + " deaths",
+        NamedTextColor.GRAY
+    ));
+  }
+
+  private void returnPlayerToBase(Player player, Arena arena) {
+    PlayerSession session = session(player);
+    if (session == null) return;
+    restoreAssassinArmour(player);
+    clearAbilityCooldowns(player);
+    player.getInventory().clear();
+    player.getInventory().setArmorContents(new ItemStack[4]);
+    player.getActivePotionEffects().forEach(effect -> player.removePotionEffect(effect.getType()));
+    player.setGameMode(GameMode.ADVENTURE);
+    Location base = arena.base(session.team());
+    if (base != null) player.teleport(base);
   }
 
   private void tickAssassinInvisibility(Player player) {
@@ -802,9 +1096,15 @@ public final class GameManager {
 
   public boolean resetArena(Arena arena) {
     RuntimeArena runtime = runtime(arena);
+    if (runtime.snapshot == null && snapshotFile(arena).exists()) {
+      runtime.snapshot = loadSnapshot(snapshotFile(arena));
+    }
     if (runtime.snapshot == null) return false;
+
+    clearTransientBlocks(arena);
     restoreArena(runtime);
     clearTemporaryEntities(arena);
+    deleteSnapshotFile(arena);
     return true;
   }
 
@@ -833,6 +1133,7 @@ public final class GameManager {
     List<BlockData> palette = new ArrayList<>();
     int[] blocks = new int[(int) volume];
     List<BlockState> tileStates = new ArrayList<>();
+    List<ContainerSnapshot> containers = new ArrayList<>();
     int index = 0;
 
     for (int y = minY; y <= maxY; y++) {
@@ -851,6 +1152,14 @@ public final class GameManager {
 
           BlockState state = block.getState();
           if (state instanceof TileState) tileStates.add(state);
+          if (state instanceof Container container) {
+            containers.add(new ContainerSnapshot(
+                x,
+                y,
+                z,
+                cloneItems(container.getInventory().getContents())
+            ));
+          }
         }
       }
     }
@@ -865,7 +1174,8 @@ public final class GameManager {
         maxZ,
         palette,
         blocks,
-        tileStates
+        tileStates,
+        containers
     );
   }
 
@@ -883,8 +1193,184 @@ public final class GameManager {
       }
     }
 
-    // Restore inventories/sign text/etc. after the underlying block types exist again.
+    // Restore captured tile state when this snapshot was made in this JVM.
     for (BlockState state : snapshot.tileStates) state.update(true, false);
+
+    // Container contents are also serialized to disk so crash recovery keeps chests,
+    // barrels, etc. intact after a hard restart.
+    for (ContainerSnapshot saved : snapshot.containers) {
+      BlockState state = snapshot.world.getBlockAt(saved.x, saved.y, saved.z).getState();
+      if (state instanceof Container container) {
+        container.getInventory().setContents(cloneItems(saved.contents));
+        container.update(true, false);
+      }
+    }
+  }
+
+  private boolean persistSnapshot(Arena arena, ArenaSnapshot snapshot) {
+    File file = snapshotFile(arena);
+    File directory = file.getParentFile();
+    if (!directory.exists() && !directory.mkdirs()) {
+      plugin.getLogger().severe("Could not create CTF snapshot directory: " + directory);
+      return false;
+    }
+
+    File temporary = new File(directory, file.getName() + ".tmp");
+    try (BukkitObjectOutputStream out = new BukkitObjectOutputStream(
+        new GZIPOutputStream(new FileOutputStream(temporary))
+    )) {
+      out.writeInt(SNAPSHOT_MAGIC);
+      out.writeInt(SNAPSHOT_VERSION);
+      out.writeUTF(snapshot.world.getUID().toString());
+      out.writeUTF(snapshot.world.getName());
+      out.writeInt(snapshot.minX);
+      out.writeInt(snapshot.minY);
+      out.writeInt(snapshot.minZ);
+      out.writeInt(snapshot.maxX);
+      out.writeInt(snapshot.maxY);
+      out.writeInt(snapshot.maxZ);
+
+      out.writeInt(snapshot.palette.size());
+      for (BlockData data : snapshot.palette) out.writeUTF(data.getAsString());
+
+      out.writeInt(snapshot.blocks.length);
+      for (int block : snapshot.blocks) out.writeInt(block);
+
+      out.writeInt(snapshot.containers.size());
+      for (ContainerSnapshot container : snapshot.containers) {
+        out.writeInt(container.x);
+        out.writeInt(container.y);
+        out.writeInt(container.z);
+        out.writeObject(container.contents);
+      }
+    } catch (IOException exception) {
+      plugin.getLogger().severe(
+          "Could not write pre-game snapshot for '" + arena.name() + "': " + exception.getMessage()
+      );
+      temporary.delete();
+      return false;
+    }
+
+    try {
+      try {
+        Files.move(
+            temporary.toPath(),
+            file.toPath(),
+            StandardCopyOption.REPLACE_EXISTING,
+            StandardCopyOption.ATOMIC_MOVE
+        );
+      } catch (IOException atomicFailure) {
+        Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING);
+      }
+      return true;
+    } catch (IOException exception) {
+      plugin.getLogger().severe(
+          "Could not install pre-game snapshot for '" + arena.name() + "': " + exception.getMessage()
+      );
+      temporary.delete();
+      return false;
+    }
+  }
+
+  private ArenaSnapshot loadSnapshot(File file) {
+    try (BukkitObjectInputStream in = new BukkitObjectInputStream(
+        new GZIPInputStream(new FileInputStream(file))
+    )) {
+      if (in.readInt() != SNAPSHOT_MAGIC) throw new IOException("invalid snapshot header");
+      int version = in.readInt();
+      if (version != SNAPSHOT_VERSION) throw new IOException("unsupported snapshot version " + version);
+
+      UUID worldId = UUID.fromString(in.readUTF());
+      String worldName = in.readUTF();
+      World world = Bukkit.getWorld(worldId);
+      if (world == null) world = Bukkit.getWorld(worldName);
+      if (world == null) throw new IOException("snapshot world is not loaded: " + worldName);
+
+      int minX = in.readInt();
+      int minY = in.readInt();
+      int minZ = in.readInt();
+      int maxX = in.readInt();
+      int maxY = in.readInt();
+      int maxZ = in.readInt();
+
+      int paletteSize = in.readInt();
+      List<BlockData> palette = new ArrayList<>(paletteSize);
+      for (int i = 0; i < paletteSize; i++) palette.add(Bukkit.createBlockData(in.readUTF()));
+
+      int blockCount = in.readInt();
+      int[] blocks = new int[blockCount];
+      for (int i = 0; i < blockCount; i++) blocks[i] = in.readInt();
+
+      int containerCount = in.readInt();
+      List<ContainerSnapshot> containers = new ArrayList<>(containerCount);
+      for (int i = 0; i < containerCount; i++) {
+        int x = in.readInt();
+        int y = in.readInt();
+        int z = in.readInt();
+        Object raw = in.readObject();
+        if (!(raw instanceof ItemStack[] contents)) {
+          throw new IOException("invalid container data in snapshot");
+        }
+        containers.add(new ContainerSnapshot(x, y, z, cloneItems(contents)));
+      }
+
+      return new ArenaSnapshot(
+          world,
+          minX,
+          minY,
+          minZ,
+          maxX,
+          maxY,
+          maxZ,
+          palette,
+          blocks,
+          List.of(),
+          containers
+      );
+    } catch (IOException | ClassNotFoundException | IllegalArgumentException exception) {
+      plugin.getLogger().severe(
+          "Could not read CTF snapshot '" + file.getName() + "': " + exception.getMessage()
+      );
+      return null;
+    }
+  }
+
+  private File snapshotFile(Arena arena) {
+    String safeName = arena.name().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9._-]", "_");
+    return new File(new File(plugin.getDataFolder(), "snapshots"), safeName + ".ctfsnap.gz");
+  }
+
+  private void deleteSnapshotFile(Arena arena) {
+    File file = snapshotFile(arena);
+    try {
+      Files.deleteIfExists(file.toPath());
+    } catch (IOException exception) {
+      plugin.getLogger().warning(
+          "Could not delete completed snapshot for '" + arena.name() + "': " + exception.getMessage()
+      );
+    }
+  }
+
+  private static ItemStack[] cloneItems(ItemStack[] source) {
+    ItemStack[] clone = new ItemStack[source.length];
+    for (int i = 0; i < source.length; i++) {
+      clone[i] = source[i] == null ? null : source[i].clone();
+    }
+    return clone;
+  }
+
+  private static BlockKey blockKey(Block block) {
+    return new BlockKey(
+        block.getWorld().getUID(),
+        block.getX(),
+        block.getY(),
+        block.getZ()
+    );
+  }
+
+  private static Block blockForKey(BlockKey key) {
+    World world = Bukkit.getWorld(key.worldId);
+    return world == null ? null : world.getBlockAt(key.x, key.y, key.z);
   }
 
   private void clearTemporaryEntities(Arena arena) {
@@ -962,6 +1448,7 @@ public final class GameManager {
     private final List<BlockData> palette;
     private final int[] blocks;
     private final List<BlockState> tileStates;
+    private final List<ContainerSnapshot> containers;
 
     private ArenaSnapshot(
         World world,
@@ -973,7 +1460,8 @@ public final class GameManager {
         int maxZ,
         List<BlockData> palette,
         int[] blocks,
-        List<BlockState> tileStates
+        List<BlockState> tileStates,
+        List<ContainerSnapshot> containers
     ) {
       this.world = world;
       this.minX = minX;
@@ -985,6 +1473,48 @@ public final class GameManager {
       this.palette = List.copyOf(palette);
       this.blocks = blocks;
       this.tileStates = List.copyOf(tileStates);
+      this.containers = List.copyOf(containers);
+    }
+  }
+
+  private record BlockKey(UUID worldId, int x, int y, int z) { }
+
+  private static final class WaterCell {
+    private final String arenaName;
+    private final BlockData original;
+    private final Set<UUID> owners = new HashSet<>();
+
+    private WaterCell(String arenaName, BlockData original) {
+      this.arenaName = arenaName;
+      this.original = original;
+    }
+  }
+
+  private static final class LeafCell {
+    private final String arenaName;
+    private int references = 1;
+
+    private LeafCell(String arenaName) {
+      this.arenaName = arenaName;
+    }
+  }
+
+  private static final class MatchStats {
+    private int kills;
+    private int deaths;
+  }
+
+  private static final class ContainerSnapshot {
+    private final int x;
+    private final int y;
+    private final int z;
+    private final ItemStack[] contents;
+
+    private ContainerSnapshot(int x, int y, int z, ItemStack[] contents) {
+      this.x = x;
+      this.y = y;
+      this.z = z;
+      this.contents = contents;
     }
   }
 
