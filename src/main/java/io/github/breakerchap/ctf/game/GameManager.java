@@ -84,8 +84,10 @@ public final class GameManager {
     if (ticker != null) ticker.cancel();
     for (RuntimeArena runtime : runtimes.values()) {
       hideBossbars(runtime.arena);
-      restoreArena(runtime);
-      clearTemporaryEntities(runtime.arena);
+      if (runtime.state != ArenaState.WAITING) {
+        restoreArena(runtime);
+        clearTemporaryEntities(runtime.arena);
+      }
     }
     runtimes.clear();
   }
