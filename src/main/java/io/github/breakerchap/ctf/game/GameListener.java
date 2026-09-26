@@ -19,6 +19,7 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockFromToEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityTargetLivingEntityEvent;
@@ -27,6 +28,7 @@ import org.bukkit.event.entity.ProjectileLaunchEvent;
 import org.bukkit.event.player.PlayerBucketEmptyEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.inventory.EquipmentSlot;
@@ -102,6 +104,11 @@ public final class GameListener implements Listener {
       return;
     }
     event.setDropItems(false);
+  }
+
+  @EventHandler(ignoreCancelled = true)
+  public void onWaterFlow(BlockFromToEvent event) {
+    games.waterFlow(event.getBlock(), event.getToBlock());
   }
 
   @EventHandler(ignoreCancelled = true)
@@ -191,6 +198,7 @@ public final class GameListener implements Listener {
     Player player = event.getEntity();
     Arena arena = games.arenaFor(player);
     if (arena == null || !games.isRunning(arena)) return;
+    games.recordDeath(player, player.getKiller());
     event.getDrops().clear();
     event.setDroppedExp(0);
     event.setKeepInventory(false);
@@ -214,8 +222,13 @@ public final class GameListener implements Listener {
   }
 
   @EventHandler
+  public void onJoin(PlayerJoinEvent event) {
+    games.reconnect(event.getPlayer());
+  }
+
+  @EventHandler
   public void onQuit(PlayerQuitEvent event) {
-    if (games.session(event.getPlayer()) != null) games.leave(event.getPlayer());
+    games.disconnect(event.getPlayer());
   }
 
   private Entity resolveAttacker(Entity entity) {
